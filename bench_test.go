@@ -112,3 +112,46 @@ func BenchmarkChunkerOneBigBlob(b *testing.B) {
 		_ = c.Flush()
 	}
 }
+
+// --- Per-locale hot-path benchmarks. The abbreviation map size differs
+// across locales; these guard against one large locale silently tanking
+// the zero-alloc hot path. Each uses a paragraph written natively in
+// that language so the realistic abbreviation distribution shows up.
+
+var benchTextES = `El Sr. García vive aquí, p.ej. en Madrid. ` +
+	`La Sra. Pérez compró pan, leche, etc. ayer. ` +
+	`Ud. y Uds. deben firmar, por favor. ` +
+	`Telefónica S.A. cotiza en EE.UU. también.`
+
+var benchTextPT = `O Prof. Dr. Santos chegou. ` +
+	`V. Exa. foi muito gentil ontem. ` +
+	`Compre fruta, p.ex. maçãs ou peras, por favor. ` +
+	`Ver pág. 15, vol. 2 da colecção. ` +
+	`A ACME Lda. abriu no séc. XX.`
+
+var benchTextDE = `Hr. Schmidt und Fr. Weber sind z.B. hier. ` +
+	`Der Dr. Braun, d.h. u.a. der Leiter, kommt ca. bald. ` +
+	`Die Firma GmbH bzw. die AG, ggf. evtl. beide. ` +
+	`200 v.Chr. bis 300 n.Chr. passierte viel.`
+
+var benchTokensES = splitForBench(benchTextES)
+var benchTokensPT = splitForBench(benchTextPT)
+var benchTokensDE = splitForBench(benchTextDE)
+
+func benchLocale(b *testing.B, lang string, tokens []string) {
+	c := New(Config{Mode: ModeSentence, MaxWords: 40, Language: lang})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tok := tokens[i%len(tokens)]
+		_ = c.Add(tok)
+		if i%len(tokens) == len(tokens)-1 {
+			_ = c.Flush()
+			c.Reset()
+		}
+	}
+}
+
+func BenchmarkChunkerAdd_Spanish(b *testing.B)    { benchLocale(b, "es-ES", benchTokensES) }
+func BenchmarkChunkerAdd_Portuguese(b *testing.B) { benchLocale(b, "pt-PT", benchTokensPT) }
+func BenchmarkChunkerAdd_German(b *testing.B)     { benchLocale(b, "de-DE", benchTokensDE) }

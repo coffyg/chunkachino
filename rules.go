@@ -59,10 +59,20 @@ func isWordRune(r rune) bool {
 	return false
 }
 
-// isDigit is a tiny helper over unicode.IsDigit kept local for clarity and
-// a hair of inlining help.
+// isDigit reports whether r is any unicode decimal digit. The fast path
+// covers ASCII 0-9 (the overwhelming majority) inline; we only defer to
+// unicode.IsDigit for rarer digit scripts like Arabic-Indic (٠-٩),
+// Extended Arabic-Indic (۰-۹), and Devanagari (०-९). Keeping this
+// unicode-aware matters for decimals in non-Latin content — "٣.١٤"
+// should be treated as a number, not a sentence boundary.
 func isDigit(r rune) bool {
-	return r >= '0' && r <= '9'
+	if r >= '0' && r <= '9' {
+		return true
+	}
+	if r < 128 {
+		return false
+	}
+	return unicode.IsDigit(r)
 }
 
 // isASCIILetter mirrors isDigit for ASCII letters; used in the single-letter
@@ -71,29 +81,31 @@ func isASCIILetter(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
-// resolveLanguage normalizes a BCP 47 (or looser) language tag down to the
-// primary subtag used as a key into the abbreviation catalog. The resolution
-// is case-insensitive and accepts either '-' or '_' as the subtag separator.
+// resolveLanguage maps one of the literal accepted language keys to the
+// internal catalog key. The accepted keys are EXACTLY:
 //
-// Fallback chain:
-//  1. exact lowercase match against a known full tag ("pt-pt", "fr-fr", ...)
-//  2. primary subtag match ("pt-PT" → "pt", "en-GB" → "en")
-//  3. "en" as the ultimate default
+//   - "en-US", "es-ES", "fr-FR", "pt-PT", "de-DE"  (the five Soulkyn
+//     audio locales)
+//   - "en", "fr"  (legacy short aliases, kept for backwards compatibility)
 //
-// Returns the catalog key ("en", "fr", "es", "pt", "de"). Never returns an
-// empty string.
+// Matching is case-insensitive and tolerates '_' in place of '-' as a
+// separator. Anything else (including "en-GB", "es", "pt", "de") falls
+// back to English. There is intentionally no BCP 47 primary-subtag
+// fallback tree — Flo's spec is a flat list of 5 locales + 2 aliases.
+//
+// Returns one of: "en", "fr", "es", "pt", "de". Never returns empty.
 func resolveLanguage(lang string) string {
 	if lang == "" {
 		return "en"
 	}
 	l := strings.ToLower(lang)
-	l = strings.ReplaceAll(l, "_", "-")
-
-	// 1. Exact full-tag matches for the five Soulkyn audio locales.
+	if strings.IndexByte(l, '_') >= 0 {
+		l = strings.ReplaceAll(l, "_", "-")
+	}
 	switch l {
-	case "en-us", "en-gb":
+	case "en-us", "en":
 		return "en"
-	case "fr-fr", "fr-ca":
+	case "fr-fr", "fr":
 		return "fr"
 	case "es-es":
 		return "es"
@@ -102,24 +114,13 @@ func resolveLanguage(lang string) string {
 	case "de-de":
 		return "de"
 	}
-
-	// 2. Primary subtag fallback — take everything before the first '-'.
-	primary := l
-	if i := strings.IndexByte(l, '-'); i >= 0 {
-		primary = l[:i]
-	}
-	switch primary {
-	case "en", "fr", "es", "pt", "de":
-		return primary
-	}
-
-	// 3. Default.
 	return "en"
 }
 
 // abbreviationsForLang returns the curated abbreviation set for the given
-// language code. Unknown languages fall back to English. Input is resolved
-// through resolveLanguage so BCP 47 tags like "pt-PT" work directly.
+// language key. Unknown or unsupported language strings fall back to
+// English. Input is resolved through resolveLanguage; the accepted keys
+// are listed there.
 func abbreviationsForLang(lang string) map[string]struct{} {
 	switch resolveLanguage(lang) {
 	case "fr":

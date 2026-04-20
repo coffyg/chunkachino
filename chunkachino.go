@@ -85,8 +85,10 @@ type Config struct {
 	// Set to 0 to disable the safety valve (chunker will wait forever).
 	MaxWords int
 
-	// Language selects the abbreviation catalog. "en" and "fr" are
-	// supported; unknown values fall back to English. Default: "en".
+	// Language selects the abbreviation catalog. Accepted keys are the
+	// five Soulkyn audio locales exactly — "en-US", "es-ES", "fr-FR",
+	// "pt-PT", "de-DE" — plus the legacy short aliases "en" and "fr".
+	// Anything else falls back to English. Default: "en".
 	Language string
 }
 
@@ -364,11 +366,28 @@ func (c *Chunker) classifyPeriod(tIdx int) (real, needsLookahead bool) {
 	}
 	word := c.buf[wordStart:wordEnd]
 
-	// Multi-period abbreviations such as "e.g." / "Ph.D." / "U.S.A." walk
-	// backward through inner ". <letter>" segments.
+	// Multi-period abbreviations such as "e.g." / "Ph.D." / "U.S.A." /
+	// "V. Exa." / "z. B." walk backward through inner ". <letter>"
+	// segments. The walk tolerates at most one ASCII space between an
+	// inner dot and the previous word so both "V.Exa." (squeezed) and
+	// "V. Exa." (spaced) forms share the same lookup key — the abbrev
+	// map is built space-free ("v.exa") and the key passed to the
+	// classifier is likewise built with spaces squeezed out.
 	extStart := wordStart
-	for extStart >= 2 && c.buf[extStart-1] == '.' {
-		innerDot := extStart - 1
+	sawSpaceBetween := false
+	for {
+		// Step past an optional ASCII space (at most one) between the
+		// current extStart and a candidate inner dot.
+		probe := extStart - 1
+		skippedSpace := false
+		if probe >= 0 && c.buf[probe] == ' ' {
+			probe--
+			skippedSpace = true
+		}
+		if probe < 1 || c.buf[probe] != '.' {
+			break
+		}
+		innerDot := probe
 		newStart := innerDot
 		for newStart > 0 && isWordRune(c.buf[newStart-1]) {
 			newStart--
@@ -377,9 +396,24 @@ func (c *Chunker) classifyPeriod(tIdx int) (real, needsLookahead bool) {
 			break
 		}
 		extStart = newStart
+		if skippedSpace {
+			sawSpaceBetween = true
+		}
 	}
 	if extStart < wordStart {
 		combined := c.buf[extStart:wordEnd]
+		if sawSpaceBetween {
+			// Build a space-squeezed copy for the abbreviation lookup so
+			// "V. Exa." and "V.Exa." share the same key.
+			squeezed := make([]rune, 0, len(combined))
+			for _, r := range combined {
+				if r == ' ' {
+					continue
+				}
+				squeezed = append(squeezed, r)
+			}
+			combined = squeezed
+		}
 		if isKnownAbbreviation(combined, c.abbrs) {
 			return false, false
 		}
@@ -429,6 +463,37 @@ func (c *Chunker) classifyPeriod(tIdx int) (real, needsLookahead bool) {
 				}
 				if c.buf[k] == '.' {
 					return false, false // "J. F." confirmed initial run
+				}
+			} else if k-j > 1 {
+				// Next word is multi-letter capitalized; it might form a
+				// compound dotted abbreviation with the current single-
+				// letter initial (e.g. Portuguese "V. Exa.", German
+				// "z. B." spaced form when the second token is multiletter).
+				// If the next rune after the word is a period AND the
+				// space-squeezed "<letter>.<word>" is a known abbreviation,
+				// this period is NOT a sentence end.
+				if k >= len(c.buf) {
+					// Don't know yet if a period follows the next word.
+					return false, true
+				}
+				if c.buf[k] == '.' {
+					// Build lowercase "<letter>.<word>" (no intervening space).
+					const stackN = 32
+					var buf [stackN]rune
+					var key []rune
+					need := 1 + 1 + (k - j)
+					if need <= stackN {
+						key = buf[:0]
+					} else {
+						key = make([]rune, 0, need)
+					}
+					key = append(key, unicode.ToLower(word[0]), '.')
+					for p := j; p < k; p++ {
+						key = append(key, unicode.ToLower(c.buf[p]))
+					}
+					if _, ok := c.abbrs[string(key)]; ok {
+						return false, false
+					}
 				}
 			}
 			// Next word is a regular capitalized word (start of next
