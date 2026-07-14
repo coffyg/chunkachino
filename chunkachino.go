@@ -18,6 +18,11 @@
 //   - ModePhrase:   flush on . ! ? , ; : at a word boundary. Finer
 //     granularity for prosody in long-form TTS. Same safety valve.
 //
+// Sentence/phrase mode also takes an optional MinChunkWords runt gate:
+// a terminator on a chunk shorter than N complete words does not flush,
+// so a lone "haha..." merges into the sentence that follows it instead
+// of reaching the TTS engine as its own weird-prosody utterance.
+//
 // The API is intentionally minimal:
 //
 //	c := chunkachino.New(chunkachino.Config{
@@ -90,6 +95,24 @@ type Config struct {
 	// "pt-PT", "de-DE" — plus the legacy short aliases "en" and "fr".
 	// Anything else falls back to English. Default: "en".
 	Language string
+
+	// MinChunkWords is the sentence/phrase-mode RUNT GATE: a chunk that
+	// reaches a terminator with fewer than this many complete words does
+	// NOT flush — it stays buffered and merges into the following
+	// sentence, so "haha..." + "You should have seen it." emit as ONE
+	// chunk. Built for TTS: a lone interjection ("haha...", "heh...",
+	// "Ah.") synthesized as its own utterance gets full sentence prosody
+	// and sounds wrong; grouped with its neighbor it reads naturally.
+	// Consecutive runts accumulate until they jointly clear the bar.
+	//
+	// The MaxWords safety valve still applies. An END-OF-STREAM runt
+	// still ships via Flush — there is no following sentence to merge
+	// into, and merging BACKWARD would mean delaying every chunk by one
+	// sentence, which a low-latency pipeline can't afford.
+	//
+	// 0 (default) disables the gate — pre-v0.0.2 behavior, byte-exact.
+	// Ignored in ModeWord (MinWords governs there).
+	MinChunkWords int
 }
 
 // Chunker is a stateful streaming text chunker. NOT safe for concurrent use
@@ -253,6 +276,13 @@ func (c *Chunker) scan() (string, bool) {
 			return "", false
 		}
 		if terminator {
+			// Runt gate (MinChunkWords): a real terminator on a too-short
+			// chunk ("haha...") does not flush — keep scanning so the runt
+			// merges into the following sentence. Runts accumulate: two
+			// tiny sentences flush together once they jointly clear the bar.
+			if c.cfg.MinChunkWords > 0 && countWordsInPrefix(c.buf, wsIdx) < c.cfg.MinChunkWords {
+				continue
+			}
 			return c.emit(c.scanPos)
 		}
 		if (c.cfg.Mode == ModeSentence || c.cfg.Mode == ModePhrase) &&

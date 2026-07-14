@@ -83,6 +83,23 @@ The following do **not** trigger a flush:
 
 In `ModeSentence` and `ModePhrase`, if the buffered word count exceeds `MaxWords` without a real terminator, chunkachino flushes at the next whitespace so a rambling LLM response never stalls the TTS pipeline. Default `MaxWords` is 30. Set to 0 to disable (the chunker will then wait forever for a terminator — not recommended in production).
 
+## Runt gate (`MinChunkWords`, v0.0.2)
+
+A lone interjection — `haha...`, `heh...`, `Ah.` — is a legal sentence, so sentence mode flushes it as its own chunk, and a TTS engine then gives one word full sentence prosody. It sounds weird every time.
+
+Set `MinChunkWords` to refuse terminator flushes below N complete words: the runt stays buffered and merges into the sentence that follows (`"haha... You should have seen his face."` emits as ONE chunk). Consecutive runts accumulate until they jointly clear the bar. The `MaxWords` valve still applies, and an end-of-stream runt still ships via `Flush` — there is nothing after it to merge into, and merging *backward* would cost every chunk one sentence of latency.
+
+`0` (default) disables the gate — existing pipelines are byte-exact. Ignored in `ModeWord`.
+
+```go
+c := chunkachino.New(chunkachino.Config{
+    Mode:          chunkachino.ModeSentence,
+    MaxWords:      30,
+    MinChunkWords: 3, // "haha..." rides with its neighbor instead of speaking alone
+    Language:      "en",
+})
+```
+
 ## Performance
 
 Measured on a 13th Gen Intel i7-13700:
